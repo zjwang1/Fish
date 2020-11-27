@@ -3,6 +3,7 @@
 #include <chrono>
 #include <functional>
 #include <iostream>
+#include <thread>
 #include <time.h>
 
 namespace zjwang
