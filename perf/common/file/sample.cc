@@ -9,7 +9,7 @@ int main()
     // use multiple threads for read/write file
     constexpr size_t threadNum = 4;
     zjwang::thread::ThreadPool pool{threadNum};
-    auto lbd = [](uint64_t start, uint64_t end) { std::cout << "cost :[" << (end - start) / 1000 << "]us \n"; };
+    auto lbd = [](uint64_t start, uint64_t end) { std::cout << "cost :[" << (end - start) / 1000 / 1000 << "]ms \n"; };
     constexpr size_t N = 1024 * 1024 * 1024;
 
     // std::string to char * base example
@@ -40,6 +40,7 @@ int main()
             result.get();
         }
     }
+    std::this_thread::sleep_for(std::chrono::seconds(5));
     {
         // callback func
         using namespace zjwang::file;
@@ -52,6 +53,12 @@ int main()
         };
         zjwang::perf::ScopedTimer timer{{"test std::string"}, lbd};
         zjwang::file::ReadFileAllIn("1", std::move(callback));
+    }
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+    {
+        zjwang::perf::ScopedTimer timer{{"test std::string"}, lbd};
+        std::string data;
+        zjwang::file::ReadFileAllIn("2", data);
     }
     /*{
         zjwang::perf::ScopedTimer timer{{"test std::string"}, lbd};
