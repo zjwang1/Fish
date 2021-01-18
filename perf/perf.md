@@ -61,6 +61,84 @@
 1. 运行队列统计: 
 
 
+## google benchmark工具
+对一个代码片段做优化有奇效.
+
+发现热点代码片段 -> benchmark找到base line -> 花里胡哨优化 -> 继续benchmark迭代
+
+好的中文教程: https://www.cnblogs.com/apocelipes/p/10348925.html
+### 要点:
+一个benchmark任务的原型是```c++std::function<void(benchmark::State&)>```.
+
+测试过程中可以用constexpr进行编译期数值计算，尽量避免运行时计算对测试结果的干扰.
+
+
+对于不想测试的代码，可以通过启停state的计时器来处理. Like this: 
+```c++
+do_something();
+state.PauseTiming();
+do_else();
+state.ResumeTiming();
+```
+
+通过指定参数来控制benchmark运行时参数. 提供了基础的整数序列传递. 其他对象的传递其实可以用全局变量来搞.
+```c++
+// In func scope:
+auto x = state.range(0);
+// ...
+
+// while call func
+BENCHMARK(func)->Arg(10);
+
+// 考虑更多的参数，可以用Range来做
+
+```
+
+C++11后都支持传参
+```c++
+template <class ...ExtraArgs>
+void BM_takes_args(benchmark::State& state, ExtraArgs&&... extra_args) {
+  [...]
+}
+// Registers a benchmark named "BM_takes_args/int_string_test" that passes
+// the specified values to `extra_args`.
+BENCHMARK_CAPTURE(BM_takes_args, int_string_test, 42, std::string("abc"));
+```
+
+用模板控制同一个动作的多个实现
+```c++
+template <class Q> void BM_Sequential(benchmark::State& state) {
+  Q q;
+  typename Q::value_type v;
+  for (auto _ : state) {
+    for (int i = state.range(0); i--; )
+      q.push(v);
+    for (int e = state.range(0); e--; )
+      q.Wait(&v);
+  }
+  // actually messages, not bytes:
+  state.SetBytesProcessed(
+      static_cast<int64_t>(state.iterations())*state.range(0));
+}
+BENCHMARK_TEMPLATE(BM_Sequential, WaitQueue<int>)->Range(1<<0, 1<<10);
+```
+
+多线程压测
+```c++
+static void BM_MultiThreaded(benchmark::State& state) {
+  if (state.thread_index == 0) {
+    // Setup code here.
+  }
+  for (auto _ : state) {
+    // Run the test as normal.
+  }
+  if (state.thread_index == 0) {
+    // Teardown code here.
+  }
+}
+BENCHMARK(BM_MultiThreaded)->Threads(2);
+```
+
 
 
 

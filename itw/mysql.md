@@ -1,0 +1,4 @@
+# mysql
+
+## index
+B+ tree
