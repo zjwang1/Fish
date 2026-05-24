@@ -69,13 +69,13 @@ def _annualise(rate: float) -> float:
 def compute_snapshot(pair: ArbPair) -> Optional[FundingSnapshot]:
     """Fetch prices + funding data and compute a FundingSnapshot."""
 
-    stock_price = get_stock_price(pair.stock_ticker)
+    stock_price = get_stock_price(pair.stock_symbol)
     futures_price = get_futures_price(pair.futures_symbol)
 
     if stock_price is None or futures_price is None:
         logger.warning(
             "Skipping %s – missing price (stock=%s, futures=%s)",
-            pair.stock_ticker, stock_price, futures_price,
+            pair.ticker, stock_price, futures_price,
         )
         return None
 
@@ -171,7 +171,7 @@ def format_snapshot(snap: FundingSnapshot) -> str:
     return (
         f"{color}"
         f"[{snap.timestamp:%Y-%m-%d %H:%M:%S UTC}]  "
-        f"{snap.pair.stock_ticker:6s} "
+        f"{snap.pair.ticker:6s} "
         f"Stock ${snap.stock_price:>9.2f}  "
         f"Futures ${snap.futures_price:>9.2f}  │  "
         f"Basis {snap.basis_pct:+.2f}%  │  "

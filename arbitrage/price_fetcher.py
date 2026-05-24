@@ -1,6 +1,6 @@
 """
-price_fetcher.py – Retrieve real-time prices for US stocks and Binance futures,
-plus funding-rate data needed for the funding-rate-arbitrage strategy.
+price_fetcher.py – Retrieve real-time prices for US stocks (via Bit.com)
+and Binance futures, plus funding-rate data for funding-rate arbitrage.
 """
 
 import logging
@@ -9,9 +9,16 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import ccxt
-import yfinance as yf
 
-from config import BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_TESTNET
+from config import (
+    BINANCE_API_KEY,
+    BINANCE_API_SECRET,
+    BINANCE_TESTNET,
+    BITCOM_ACCESS_KEY,
+    BITCOM_SECRET_KEY,
+    BITCOM_BASE_URL,
+)
+from bitcom_client import BitcomStockClient
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +45,28 @@ def _get_exchange() -> ccxt.binance:
     return _exchange
 
 
+# ── Bit.com stock client singleton ───────────────────────────────────
+_bitcom_client: Optional[BitcomStockClient] = None
+
+
+def _get_bitcom_client() -> BitcomStockClient:
+    """Return (and lazily create) a Bit.com Stock API client."""
+    global _bitcom_client
+    if _bitcom_client is None:
+        _bitcom_client = BitcomStockClient(
+            access_key=BITCOM_ACCESS_KEY,
+            secret_key=BITCOM_SECRET_KEY,
+            base_url=BITCOM_BASE_URL,
+        )
+        logger.info("Bit.com Stock client initialised (base=%s)", BITCOM_BASE_URL)
+    return _bitcom_client
+
+
+def get_bitcom_client() -> BitcomStockClient:
+    """Public accessor for the Bit.com client (used by trader.py)."""
+    return _get_bitcom_client()
+
+
 # ── Data containers ──────────────────────────────────────────────────
 
 @dataclass
@@ -51,22 +80,21 @@ class FundingInfo:
 
 # ── Public helpers ───────────────────────────────────────────────────
 
-def get_stock_price(ticker: str) -> Optional[float]:
-    """Fetch the latest price for a US stock via Yahoo Finance.
+def get_stock_price(symbol: str) -> Optional[float]:
+    """Fetch the latest price for a US stock via Bit.com Stock API.
 
-    Returns *None* if the data is unavailable (market closed, bad ticker, etc.).
+    *symbol* should be in Bit.com format, e.g. ``"MU.US"``.
+    Returns *None* if the data is unavailable.
     """
     try:
-        tk = yf.Ticker(ticker)
-        info = tk.fast_info
-        price = getattr(info, "last_price", None)
-        if price is None:
-            price = getattr(info, "previous_close", None)
-        if price is not None:
-            logger.debug("Stock %s price: %.4f", ticker, price)
-        return price
+        client = _get_bitcom_client()
+        quote = client.get_quote(symbol)
+        if quote is not None and quote.last_price > 0:
+            logger.debug("Stock %s price (Bit.com): %.4f", symbol, quote.last_price)
+            return quote.last_price
+        return None
     except Exception:
-        logger.exception("Failed to fetch stock price for %s", ticker)
+        logger.exception("Failed to fetch stock price for %s via Bit.com", symbol)
         return None
 
 

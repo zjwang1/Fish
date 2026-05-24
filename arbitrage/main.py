@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
 main.py – Entry-point for the US-Stock ↔ Binance-Futures funding-rate
-arbitrage monitor.
+arbitrage monitor and trader.
 
-Strategy:  LONG US stock  +  SHORT Binance perpetual futures.
+Strategy:  LONG US stock (via Bit.com)  +  SHORT Binance perpetual futures.
 Profit = funding rate (paid to shorts when positive) + basis convergence.
 
 Usage:
     python main.py              # live monitor (prints to terminal)
     python main.py --once       # single snapshot then exit
     python main.py --csv out.csv  # append every snapshot to a CSV file
+    python main.py --trade      # enable live trading (opens/closes positions)
+    python main.py --positions  # show current positions on both venues
 """
 
 import argparse
 import csv
 import logging
-import os
 import sys
 import time
 from pathlib import Path
@@ -34,7 +35,7 @@ def _setup_logging() -> None:
 
 def _csv_header() -> list[str]:
     return [
-        "timestamp", "stock_ticker", "stock_price",
+        "timestamp", "stock_symbol", "stock_price",
         "futures_symbol", "futures_price",
         "basis_pct", "funding_rate", "funding_apy",
         "avg_funding_rate", "avg_funding_apy",
@@ -45,7 +46,7 @@ def _csv_header() -> list[str]:
 def _snap_to_row(snap: FundingSnapshot) -> list[str]:
     return [
         snap.timestamp.isoformat(),
-        snap.pair.stock_ticker,
+        snap.pair.stock_symbol,
         f"{snap.stock_price:.4f}",
         snap.pair.futures_symbol,
         f"{snap.futures_price:.4f}",
@@ -59,8 +60,11 @@ def _snap_to_row(snap: FundingSnapshot) -> list[str]:
     ]
 
 
-def run_once(csv_path: str | None = None) -> None:
-    """Fetch and display a single round of snapshots."""
+def run_once(
+    csv_path: str | None = None,
+    trade_enabled: bool = False,
+) -> None:
+    """Fetch and display a single round of snapshots, optionally trade."""
     snapshots: list[FundingSnapshot] = []
     for pair in ARB_PAIRS:
         snap = compute_snapshot(pair)
@@ -89,6 +93,10 @@ def run_once(csv_path: str | None = None) -> None:
     if exit_count:
         print(f"  🚨 {exit_count} pair(s) with EXIT signal (funding negative)")
 
+    # Live trading
+    if trade_enabled:
+        _execute_signals(snapshots)
+
     # Optional CSV logging
     if csv_path:
         file_exists = Path(csv_path).exists()
@@ -100,10 +108,78 @@ def run_once(csv_path: str | None = None) -> None:
                 writer.writerow(_snap_to_row(snap))
 
 
+def _execute_signals(snapshots: list[FundingSnapshot]) -> None:
+    """Execute trades based on signals (only when --trade is enabled)."""
+    from trader import (
+        open_arb_position,
+        close_arb_position,
+        format_trade_result,
+        get_stock_positions,
+    )
+
+    # Get current stock positions to avoid duplicates
+    try:
+        stock_positions = get_stock_positions()
+    except Exception:
+        stock_positions = {}
+
+    for snap in snapshots:
+        has_position = snap.pair.stock_symbol in stock_positions
+
+        if snap.signal == "ENTER" and not has_position:
+            print(f"\n  📈 Opening position: {snap.pair.ticker} ...")
+            result = open_arb_position(
+                snap.pair,
+                stock_price=snap.stock_price,
+                futures_price=snap.futures_price,
+            )
+            print(f"  {format_trade_result(result)}")
+
+        elif snap.signal == "EXIT" and has_position:
+            print(f"\n  📉 Closing position: {snap.pair.ticker} ...")
+            qty = int(stock_positions.get(snap.pair.stock_symbol, 0))
+            if qty > 0:
+                result = close_arb_position(
+                    snap.pair,
+                    qty=qty,
+                    stock_price=snap.stock_price,
+                    futures_price=snap.futures_price,
+                )
+                print(f"  {format_trade_result(result)}")
+
+
+def show_positions() -> None:
+    """Display current positions on both Bit.com and Binance."""
+    from trader import get_stock_positions, get_futures_positions
+
+    print("\n╔══════════════════════════════════════════════╗")
+    print("║           Current Positions                  ║")
+    print("╚══════════════════════════════════════════════╝")
+
+    print("\n  📊 Stock Positions (Bit.com):")
+    stock_pos = get_stock_positions()
+    if stock_pos:
+        for symbol, qty in stock_pos.items():
+            print(f"    {symbol:12s}  qty={qty:.0f}")
+    else:
+        print("    (none)")
+
+    print("\n  📊 Futures Positions (Binance):")
+    futures_pos = get_futures_positions()
+    if futures_pos:
+        for symbol, qty in futures_pos.items():
+            direction = "SHORT" if qty < 0 else "LONG"
+            print(f"    {symbol:20s}  {direction} qty={abs(qty):.4f}")
+    else:
+        print("    (none)")
+
+    print()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="US Stock ↔ Binance Futures Funding-Rate Arbitrage Monitor\n\n"
-                    "Strategy: LONG stock + SHORT Binance perp → earn funding rate",
+        description="US Stock ↔ Binance Futures Funding-Rate Arbitrage\n\n"
+                    "Strategy: LONG stock (Bit.com) + SHORT Binance perp → earn funding rate",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -114,30 +190,47 @@ def main() -> None:
         "--csv", type=str, default=None, metavar="FILE",
         help="Append snapshots to a CSV file",
     )
+    parser.add_argument(
+        "--trade", action="store_true",
+        help="Enable live trading (opens/closes positions based on signals)",
+    )
+    parser.add_argument(
+        "--positions", action="store_true",
+        help="Show current positions on both venues and exit",
+    )
     args = parser.parse_args()
 
     _setup_logging()
 
-    print("╔══════════════════════════════════════════════════════════════╗")
-    print("║   Funding-Rate Arbitrage: LONG Stock + SHORT Binance Perp  ║")
-    print("╚══════════════════════════════════════════════════════════════╝")
+    if args.positions:
+        show_positions()
+        return
+
+    print("╔══════════════════════════════════════════════════════════════════╗")
+    print("║  Funding-Rate Arbitrage: LONG Stock (Bit.com) + SHORT Binance  ║")
+    print("╚══════════════════════════════════════════════════════════════════╝")
+    trade_label = " 🔴 LIVE TRADING" if args.trade else ""
     print(f"  Pairs: {len(ARB_PAIRS)}  |  "
           f"Min APY: {MIN_FUNDING_APY:.1f}%  |  "
           f"Max Basis: {MAX_BASIS_PCT:.1f}%  |  "
-          f"Interval: {POLL_INTERVAL}s")
+          f"Interval: {POLL_INTERVAL}s{trade_label}")
     print("-" * 140)
     for pair in ARB_PAIRS:
-        print(f"  {pair.stock_ticker:6s} ↔ {pair.futures_symbol:20s}  ({pair.description})")
+        print(f"  {pair.stock_symbol:10s} ↔ {pair.futures_symbol:20s}  ({pair.description})")
     print("-" * 140)
 
+    if args.trade:
+        print("\n  ⚠️  LIVE TRADING ENABLED – orders will be placed on Bit.com & Binance!")
+        print("  Press Ctrl+C to stop.\n")
+
     if args.once:
-        run_once(csv_path=args.csv)
+        run_once(csv_path=args.csv, trade_enabled=args.trade)
         return
 
     # Continuous loop
     try:
         while True:
-            run_once(csv_path=args.csv)
+            run_once(csv_path=args.csv, trade_enabled=args.trade)
             time.sleep(POLL_INTERVAL)
     except KeyboardInterrupt:
         print("\nStopped by user.")
