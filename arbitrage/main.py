@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-main.py – Entry-point for the US-Stock ↔ Binance-Futures arbitrage monitor.
+main.py – Entry-point for the US-Stock ↔ Binance-Futures funding-rate
+arbitrage monitor.
+
+Strategy:  LONG US stock  +  SHORT Binance perpetual futures.
+Profit = funding rate (paid to shorts when positive) + basis convergence.
 
 Usage:
     python main.py              # live monitor (prints to terminal)
@@ -16,8 +20,8 @@ import sys
 import time
 from pathlib import Path
 
-from config import ARB_PAIRS, POLL_INTERVAL, LOG_LEVEL
-from spread_monitor import compute_spread, format_snapshot, SpreadSnapshot
+from config import ARB_PAIRS, POLL_INTERVAL, LOG_LEVEL, MIN_FUNDING_APY, MAX_BASIS_PCT
+from spread_monitor import compute_snapshot, format_snapshot, FundingSnapshot
 
 
 def _setup_logging() -> None:
@@ -32,30 +36,34 @@ def _csv_header() -> list[str]:
     return [
         "timestamp", "stock_ticker", "stock_price",
         "futures_symbol", "futures_price",
-        "implied_crypto_price", "spread_pct",
-        "funding_rate", "signal",
+        "basis_pct", "funding_rate", "funding_apy",
+        "avg_funding_rate", "avg_funding_apy",
+        "next_funding_time", "signal",
     ]
 
 
-def _snap_to_row(snap: SpreadSnapshot) -> list[str]:
+def _snap_to_row(snap: FundingSnapshot) -> list[str]:
     return [
         snap.timestamp.isoformat(),
         snap.pair.stock_ticker,
         f"{snap.stock_price:.4f}",
         snap.pair.futures_symbol,
         f"{snap.futures_price:.4f}",
-        f"{snap.implied_stock_crypto:.4f}",
-        f"{snap.spread_pct:.4f}",
+        f"{snap.basis_pct:.4f}",
         f"{snap.funding_rate:.6f}" if snap.funding_rate is not None else "",
+        f"{snap.funding_apy:.2f}" if snap.funding_apy is not None else "",
+        f"{snap.avg_funding_rate:.6f}" if snap.avg_funding_rate is not None else "",
+        f"{snap.avg_funding_apy:.2f}" if snap.avg_funding_apy is not None else "",
+        snap.next_funding_time.isoformat() if snap.next_funding_time else "",
         snap.signal,
     ]
 
 
 def run_once(csv_path: str | None = None) -> None:
     """Fetch and display a single round of snapshots."""
-    snapshots: list[SpreadSnapshot] = []
+    snapshots: list[FundingSnapshot] = []
     for pair in ARB_PAIRS:
-        snap = compute_spread(pair)
+        snap = compute_snapshot(pair)
         if snap is not None:
             snapshots.append(snap)
 
@@ -63,16 +71,23 @@ def run_once(csv_path: str | None = None) -> None:
         print("No data available – market may be closed or API keys missing.")
         return
 
+    # Sort: best signals first (ENTER > HOLD > UNFAVORABLE > EXIT)
+    signal_order = {"ENTER": 0, "HOLD": 1, "UNFAVORABLE": 2, "EXIT": 3}
+    snapshots.sort(key=lambda s: signal_order.get(s.signal, 99))
+
     # Terminal output
-    print("=" * 130)
+    print("=" * 140)
     for snap in snapshots:
-        line = format_snapshot(snap)
-        # Highlight actionable signals
-        if snap.signal != "NEUTRAL":
-            print(f"\033[1;33m{line}\033[0m")  # yellow bold
-        else:
-            print(line)
-    print("=" * 130)
+        print(format_snapshot(snap))
+    print("=" * 140)
+
+    # Summary
+    enter_count = sum(1 for s in snapshots if s.signal == "ENTER")
+    exit_count = sum(1 for s in snapshots if s.signal == "EXIT")
+    if enter_count:
+        print(f"  ✅ {enter_count} pair(s) with ENTER signal")
+    if exit_count:
+        print(f"  🚨 {exit_count} pair(s) with EXIT signal (funding negative)")
 
     # Optional CSV logging
     if csv_path:
@@ -87,7 +102,9 @@ def run_once(csv_path: str | None = None) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="US Stock ↔ Binance Futures Arbitrage Monitor"
+        description="US Stock ↔ Binance Futures Funding-Rate Arbitrage Monitor\n\n"
+                    "Strategy: LONG stock + SHORT Binance perp → earn funding rate",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--once", action="store_true",
@@ -100,16 +117,18 @@ def main() -> None:
     args = parser.parse_args()
 
     _setup_logging()
-    logger = logging.getLogger(__name__)
 
-    print(f"Monitoring {len(ARB_PAIRS)} pairs | "
-          f"Spread threshold: {float(os.getenv('SPREAD_THRESHOLD', '2.0')):.1f}% | "
+    print("╔══════════════════════════════════════════════════════════════╗")
+    print("║   Funding-Rate Arbitrage: LONG Stock + SHORT Binance Perp  ║")
+    print("╚══════════════════════════════════════════════════════════════╝")
+    print(f"  Pairs: {len(ARB_PAIRS)}  |  "
+          f"Min APY: {MIN_FUNDING_APY:.1f}%  |  "
+          f"Max Basis: {MAX_BASIS_PCT:.1f}%  |  "
           f"Interval: {POLL_INTERVAL}s")
-    print("-" * 130)
+    print("-" * 140)
     for pair in ARB_PAIRS:
-        print(f"  {pair.stock_ticker:6s} ↔ {pair.futures_symbol:16s}  "
-              f"hedge_ratio={pair.hedge_ratio}  ({pair.description})")
-    print("-" * 130)
+        print(f"  {pair.stock_ticker:6s} ↔ {pair.futures_symbol:20s}  ({pair.description})")
+    print("-" * 140)
 
     if args.once:
         run_once(csv_path=args.csv)
