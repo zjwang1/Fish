@@ -98,12 +98,15 @@ class BacktestResult:
 # ── Exchange helper ──────────────────────────────────────────────────
 
 def _make_exchange() -> ccxt.binance:
-    config = {
-        "apiKey": BINANCE_API_KEY,
-        "secret": BINANCE_API_SECRET,
+    config: dict = {
         "options": {"defaultType": "future"},
         "enableRateLimit": True,
     }
+    # API keys are optional for backtest (only public endpoints are used)
+    if BINANCE_API_KEY:
+        config["apiKey"] = BINANCE_API_KEY
+    if BINANCE_API_SECRET:
+        config["secret"] = BINANCE_API_SECRET
     if HTTPS_PROXY:
         config["proxies"] = {"https": HTTPS_PROXY, "http": HTTPS_PROXY}
     exchange = ccxt.binance(config)
