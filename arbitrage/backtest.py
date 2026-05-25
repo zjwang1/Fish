@@ -109,7 +109,16 @@ def _make_exchange() -> ccxt.binance:
     exchange = ccxt.binance(config)
     if BINANCE_TESTNET:
         exchange.set_sandbox_mode(True)
-    exchange.load_markets()
+    try:
+        exchange.load_markets()
+    except Exception as e:
+        if "Timeout" in type(e).__name__ or "timeout" in str(e).lower():
+            raise ConnectionError(
+                f"Cannot reach Binance API: {e}. "
+                "Set HTTPS_PROXY in .env if your network blocks Binance "
+                "(e.g. HTTPS_PROXY=http://127.0.0.1:7890)."
+            ) from e
+        raise
     return exchange
 
 
@@ -478,7 +487,19 @@ def main() -> None:
     print(f"  Signal: ENTER when avg_funding_apy ≥ {min_apy:.1f}%")
     print(f"          EXIT  when current funding_rate < 0")
 
-    exchange = _make_exchange()
+    try:
+        exchange = _make_exchange()
+    except Exception as e:
+        hint = ""
+        if "Timeout" in type(e).__name__ or "timeout" in str(e).lower():
+            hint = (
+                "\n  💡 Hint: Binance API may be blocked in your network."
+                "\n     Set HTTPS_PROXY in your .env file, e.g.:"
+                "\n       HTTPS_PROXY=http://127.0.0.1:7890"
+            )
+        print(f"\n❌ Failed to connect to Binance: {e}{hint}")
+        sys.exit(1)
+
     results: list[BacktestResult] = []
 
     for pair in pairs:

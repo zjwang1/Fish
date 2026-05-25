@@ -96,7 +96,17 @@ def _get_futures_exchange() -> ccxt.binance:
         _futures_exchange = ccxt.binance(config)
         if BINANCE_TESTNET:
             _futures_exchange.set_sandbox_mode(True)
-        _futures_exchange.load_markets()
+        try:
+            _futures_exchange.load_markets()
+        except Exception as e:
+            _futures_exchange = None
+            if "Timeout" in type(e).__name__ or "timeout" in str(e).lower():
+                raise ConnectionError(
+                    f"Cannot reach Binance API: {e}. "
+                    "Set HTTPS_PROXY in .env if your network blocks Binance "
+                    "(e.g. HTTPS_PROXY=http://127.0.0.1:7890)."
+                ) from e
+            raise
     return _futures_exchange
 
 
