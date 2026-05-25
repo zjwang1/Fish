@@ -8,8 +8,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
-import ccxt
-
 from config import (
     BINANCE_API_KEY,
     BINANCE_API_SECRET,
@@ -18,31 +16,27 @@ from config import (
     BITCOM_SECRET_KEY,
     BITCOM_BASE_URL,
 )
+from binance_client import BinanceFuturesClient
 from bitcom_client import BitcomStockClient
 
 logger = logging.getLogger(__name__)
 
-# ── Binance exchange singleton ───────────────────────────────────────
-_exchange: Optional[ccxt.binance] = None
+# ── Binance client singleton ────────────────────────────────────────
+_binance: Optional[BinanceFuturesClient] = None
 
 
-def _get_exchange() -> ccxt.binance:
-    """Return (and lazily create) a ccxt Binance Futures client."""
-    global _exchange
-    if _exchange is None:
-        _exchange = ccxt.binance(
-            {
-                "apiKey": BINANCE_API_KEY,
-                "secret": BINANCE_API_SECRET,
-                "options": {"defaultType": "future"},
-                "enableRateLimit": True,
-            }
+def _get_binance() -> BinanceFuturesClient:
+    """Return (and lazily create) a Binance Futures client."""
+    global _binance
+    if _binance is None:
+        _binance = BinanceFuturesClient(
+            api_key=BINANCE_API_KEY,
+            api_secret=BINANCE_API_SECRET,
+            testnet=BINANCE_TESTNET,
         )
-        if BINANCE_TESTNET:
-            _exchange.set_sandbox_mode(True)
-            logger.info("Binance client running in TESTNET mode")
-        _exchange.load_markets()
-    return _exchange
+        mode = "TESTNET" if BINANCE_TESTNET else "LIVE"
+        logger.info("Binance Futures client initialised (%s)", mode)
+    return _binance
 
 
 # ── Bit.com stock client singleton ───────────────────────────────────
@@ -65,6 +59,11 @@ def _get_bitcom_client() -> BitcomStockClient:
 def get_bitcom_client() -> BitcomStockClient:
     """Public accessor for the Bit.com client (used by trader.py)."""
     return _get_bitcom_client()
+
+
+def get_binance_client() -> BinanceFuturesClient:
+    """Public accessor for the Binance Futures client (used by trader.py)."""
+    return _get_binance()
 
 
 # ── Data containers ──────────────────────────────────────────────────
@@ -101,12 +100,11 @@ def get_stock_price(symbol: str) -> Optional[float]:
 def get_futures_price(symbol: str) -> Optional[float]:
     """Fetch the latest price for a Binance perpetual futures contract.
 
-    *symbol* is a ccxt unified symbol, e.g. ``MU/USDT:USDT``.
+    *symbol* is e.g. ``MU/USDT:USDT`` (unified) or ``MUUSDT`` (raw).
     """
     try:
-        exchange = _get_exchange()
-        ticker = exchange.fetch_ticker(symbol)
-        price = ticker.get("last") or ticker.get("close")
+        client = _get_binance()
+        price = client.get_ticker_price(symbol)
         if price is not None:
             logger.debug("Futures %s price: %.4f", symbol, price)
         return price
@@ -121,22 +119,21 @@ def get_funding_info(symbol: str) -> Optional[FundingInfo]:
     Returns a ``FundingInfo`` dataclass or *None* on failure.
     """
     try:
-        exchange = _get_exchange()
-        fr = exchange.fetch_funding_rate(symbol)
+        client = _get_binance()
+        data = client.get_mark_price(symbol)
 
-        rate = fr.get("fundingRate")
-        if rate is None:
+        rate_str = data.get("lastFundingRate")
+        if rate_str is None:
             return None
+        rate = float(rate_str)
 
-        next_ts = fr.get("fundingDatetime") or fr.get("nextFundingDatetime")
+        next_ts = int(data.get("nextFundingTime", 0))
         next_dt: Optional[datetime] = None
-        if isinstance(next_ts, str):
-            next_dt = datetime.fromisoformat(next_ts.replace("Z", "+00:00"))
-        elif isinstance(next_ts, (int, float)):
+        if next_ts > 0:
             next_dt = datetime.fromtimestamp(next_ts / 1000, tz=timezone.utc)
 
-        mark = fr.get("markPrice")
-        index = fr.get("indexPrice")
+        mark = float(data.get("markPrice", 0)) or None
+        index = float(data.get("indexPrice", 0)) or None
 
         logger.debug(
             "Funding %s: rate=%.6f  next=%s  mark=%s  index=%s",
@@ -158,14 +155,22 @@ def get_funding_rate_history(
 ) -> list[dict]:
     """Fetch recent funding-rate history for a Binance perpetual.
 
-    Returns a list of dicts with keys ``timestamp``, ``fundingRate``, etc.
+    Returns a list of dicts with keys ``fundingTime``, ``fundingRate``, etc.
     Useful for computing the average funding rate over the past N periods.
     """
     try:
-        exchange = _get_exchange()
-        history = exchange.fetch_funding_rate_history(symbol, limit=limit)
-        logger.debug("Fetched %d funding-rate records for %s", len(history), symbol)
-        return history
+        client = _get_binance()
+        history = client.get_funding_rate_history(symbol, limit=limit)
+        # Normalise keys to match what spread_monitor expects
+        normalised = []
+        for h in history:
+            normalised.append({
+                "timestamp": int(h.get("fundingTime", 0)),
+                "fundingRate": float(h.get("fundingRate", 0)),
+                "markPrice": float(h.get("markPrice", 0)) if h.get("markPrice") else None,
+            })
+        logger.debug("Fetched %d funding-rate records for %s", len(normalised), symbol)
+        return normalised
     except Exception:
         logger.exception("Failed to fetch funding rate history for %s", symbol)
         return []

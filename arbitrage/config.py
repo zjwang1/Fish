@@ -11,7 +11,7 @@ Stock trading is done through the Bit.com (Matrixport) Stock API:
   Base URL: https://mapi.matrixport.com/stock/v1/...
 
 Each ``ArbPair`` maps a Bit.com stock symbol (e.g. ``MU.US``) to its
-corresponding Binance perpetual futures symbol (ccxt unified ID).
+corresponding Binance perpetual futures symbol.
 """
 
 import os
@@ -66,10 +66,10 @@ class ArbPair:
 
     The stock and futures represent the **same underlying** asset.
     ``stock_symbol`` uses Bit.com format (e.g. ``MU.US``).
-    ``futures_symbol`` uses ccxt unified format (e.g. ``MU/USDT:USDT``).
+    ``futures_symbol`` uses Binance format (e.g. ``MU/USDT:USDT``).
     """
     stock_symbol: str           # Bit.com stock symbol   (e.g. "MU.US")
-    futures_symbol: str         # Binance perp symbol    (ccxt unified id)
+    futures_symbol: str         # Binance perp symbol    (e.g. "MU/USDT:USDT")
     shares_per_contract: float  # how many shares equal 1 futures contract
     description: str = ""
 

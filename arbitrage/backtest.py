@@ -2,8 +2,9 @@
 """
 backtest.py – Historical backtest for the funding-rate arbitrage strategy.
 
-Fetches historical funding rates from Binance via ccxt and simulates the
-LONG stock + SHORT futures strategy to estimate annualised returns.
+Fetches historical funding rates from the Binance public REST API and
+simulates the LONG stock + SHORT futures strategy to estimate annualised
+returns.  No API key required – only public endpoints are used.
 
 Signal logic (mirrors spread_monitor.py):
   ENTER – avg funding APY ≥ MIN_FUNDING_APY  AND  |basis| ≤ MAX_BASIS_PCT
@@ -30,18 +31,16 @@ import argparse
 import csv
 import logging
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
-import ccxt
+import requests
 
 from config import (
     ARB_PAIRS,
     ArbPair,
-    BINANCE_API_KEY,
-    BINANCE_API_SECRET,
-    BINANCE_TESTNET,
     FUNDING_PERIODS_PER_YEAR,
     MAX_BASIS_PCT,
     MIN_FUNDING_APY,
@@ -94,55 +93,80 @@ class BacktestResult:
     trades: list[BacktestTrade] = field(default_factory=list)
 
 
-# ── Exchange helper ──────────────────────────────────────────────────
+# ── Binance REST API helpers ─────────────────────────────────────────
 
-def _make_exchange() -> ccxt.binance:
-    exchange = ccxt.binance({
-        "apiKey": BINANCE_API_KEY,
-        "secret": BINANCE_API_SECRET,
-        "options": {"defaultType": "future"},
-        "enableRateLimit": True,
-    })
-    if BINANCE_TESTNET:
-        exchange.set_sandbox_mode(True)
-    exchange.load_markets()
-    return exchange
+BINANCE_FAPI_BASE = "https://fapi.binance.com"
+
+
+def _unified_to_binance(symbol: str) -> str:
+    """Convert unified symbol to Binance raw symbol.
+
+    Examples:
+        'MU/USDT:USDT' → 'MUUSDT'
+        'AAPL/USDT:USDT' → 'AAPLUSDT'
+    """
+    base = symbol.split(":")[0]   # 'MU/USDT'
+    return base.replace("/", "")  # 'MUUSDT'
 
 
 # ── Data fetching ────────────────────────────────────────────────────
 
 def fetch_all_funding_history(
-    exchange: ccxt.binance,
     symbol: str,
     since_ms: int,
     until_ms: int,
 ) -> list[dict]:
-    """Fetch complete funding rate history by paginating through the API."""
+    """Fetch complete funding rate history by paginating through the Binance API.
+
+    Uses the public endpoint ``GET /fapi/v1/fundingRate`` which requires
+    no API key.  Returns records in the same shape consumed by the
+    backtest engine (keys: timestamp, fundingRate, markPrice).
+    """
+    raw_symbol = _unified_to_binance(symbol)
+    url = f"{BINANCE_FAPI_BASE}/fapi/v1/fundingRate"
     all_records: list[dict] = []
     cursor = since_ms
 
     while cursor < until_ms:
-        batch = exchange.fetch_funding_rate_history(
-            symbol, since=cursor, limit=1000,
-        )
+        params = {
+            "symbol": raw_symbol,
+            "startTime": cursor,
+            "endTime": until_ms,
+            "limit": 1000,
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=15)
+            resp.raise_for_status()
+            batch = resp.json()
+        except Exception as e:
+            logger.error("Failed to fetch funding history for %s: %s", symbol, e)
+            break
+
         if not batch:
             break
 
-        all_records.extend(batch)
+        for item in batch:
+            all_records.append({
+                "timestamp": int(item["fundingTime"]),
+                "fundingRate": float(item["fundingRate"]),
+                "markPrice": float(item.get("markPrice", 0)),
+            })
 
-        last_ts = batch[-1].get("timestamp", 0)
+        last_ts = int(batch[-1]["fundingTime"])
         if last_ts <= cursor:
             break  # no progress
         cursor = last_ts + 1
 
+        # Be nice to the API
+        time.sleep(0.2)
+
     # Filter to the requested window
-    return [r for r in all_records if since_ms <= r.get("timestamp", 0) <= until_ms]
+    return [r for r in all_records if since_ms <= r["timestamp"] <= until_ms]
 
 
 # ── Backtest engine ──────────────────────────────────────────────────
 
 def run_pair_backtest(
-    exchange: ccxt.binance,
     pair: ArbPair,
     days: int,
     min_funding_apy: float,
@@ -155,7 +179,7 @@ def run_pair_backtest(
     since_ms = now_ms - days * 24 * 60 * 60 * 1000
 
     logger.info("Fetching funding history for %s (%d days)...", pair.futures_symbol, days)
-    records = fetch_all_funding_history(exchange, pair.futures_symbol, since_ms, now_ms)
+    records = fetch_all_funding_history(pair.futures_symbol, since_ms, now_ms)
 
     if not records:
         logger.warning("No funding data for %s", pair.futures_symbol)
@@ -421,7 +445,7 @@ def main() -> None:
     parser.add_argument(
         "--symbol", type=str, default=None,
         help="Filter to a single Binance symbol (e.g. MUUSDT). "
-             "Matches against the ccxt unified ID.",
+             "Matches against the futures symbol or ticker name.",
     )
     parser.add_argument(
         "--min-apy", type=float, default=None,
@@ -469,16 +493,20 @@ def main() -> None:
     print(f"  Signal: ENTER when avg_funding_apy ≥ {min_apy:.1f}%")
     print(f"          EXIT  when current funding_rate < 0")
 
-    exchange = _make_exchange()
     results: list[BacktestResult] = []
 
     for pair in pairs:
-        result = run_pair_backtest(
-            exchange, pair, args.days,
-            min_funding_apy=min_apy,
-            max_basis_pct=max_basis,
-            avg_window=args.avg_window,
-        )
+        try:
+            result = run_pair_backtest(
+                pair, args.days,
+                min_funding_apy=min_apy,
+                max_basis_pct=max_basis,
+                avg_window=args.avg_window,
+            )
+        except Exception as e:
+            logger.error("Backtest failed for %s: %s", pair.ticker, e)
+            result = None
+
         if result is not None:
             results.append(result)
             if args.verbose:
