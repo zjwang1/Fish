@@ -1,16 +1,29 @@
 """
 trader.py – Execution module for funding-rate arbitrage.
 
-Handles opening and closing hedged positions:
-  • OPEN  = Buy stock on Bit.com  +  Short futures on Binance
-  • CLOSE = Sell stock on Bit.com  +  Close (buy) futures on Binance
+**Maker-first execution strategy**:
+
+Fee structure:
+  • Binance TradFi futures:  maker = 0%,  taker = 0.04%
+  • Bit.com US stocks:       maker/taker ≈ 0.01%
+
+To minimise fees, we always:
+  1. Place a **limit (maker) order on Binance** first and wait for fill.
+  2. Once filled, immediately place a **market (taker) order on Bit.com**.
+
+This gives us 0% on the Binance leg and ~0.01% on the stock leg,
+instead of paying 0.04% as a Binance taker.
+
+Handles:
+  • OPEN  = Short futures on Binance (maker)  →  Buy stock on Bit.com (taker)
+  • CLOSE = Buy-back futures on Binance (maker)  →  Sell stock on Bit.com (taker)
 
 This module does NOT make autonomous trading decisions – it only executes
 orders when explicitly called by the main loop or CLI.
 """
 
 import logging
-import math
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
@@ -23,8 +36,10 @@ from config import (
     BINANCE_API_SECRET,
     BINANCE_TESTNET,
     DEFAULT_TRADE_QTY,
+    MAKER_ORDER_TIMEOUT,
+    MAKER_POLL_INTERVAL,
 )
-from bitcom_client import BitcomStockClient, SIDE_BUY, SIDE_SELL, ORDER_TYPE_LIMIT
+from bitcom_client import SIDE_BUY, SIDE_SELL
 from price_fetcher import get_bitcom_client
 
 logger = logging.getLogger(__name__)
@@ -73,52 +88,93 @@ def _get_futures_exchange() -> ccxt.binance:
     return _futures_exchange
 
 
-def _short_futures(
+def _place_futures_maker(
     symbol: str,
+    side: str,
     qty: float,
-    price: Optional[float] = None,
+    price: float,
+    reduce_only: bool = False,
 ) -> dict:
-    """Open a SHORT position on Binance perpetual futures.
+    """Place a limit (maker) order on Binance perpetual futures.
 
-    Uses a limit order if *price* is given, otherwise a market order.
+    Always uses ``postOnly=True`` to guarantee maker execution (0% fee).
     """
     exchange = _get_futures_exchange()
-    order_type = "limit" if price else "market"
+    params: dict = {"postOnly": True}
+    if reduce_only:
+        params["reduceOnly"] = True
+
     order = exchange.create_order(
         symbol=symbol,
-        type=order_type,
-        side="sell",
+        type="limit",
+        side=side,
         amount=qty,
         price=price,
+        params=params,
     )
     logger.info(
-        "Futures SHORT: %s qty=%.4f price=%s → id=%s",
-        symbol, qty, price, order.get("id"),
+        "Futures MAKER %s: %s qty=%.4f price=%.4f postOnly=True → id=%s",
+        side.upper(), symbol, qty, price, order.get("id"),
     )
     return order
 
 
-def _close_short_futures(
+def _wait_for_fill(
+    order_id: str,
     symbol: str,
-    qty: float,
-    price: Optional[float] = None,
+    timeout: int = MAKER_ORDER_TIMEOUT,
+    poll_interval: float = MAKER_POLL_INTERVAL,
 ) -> dict:
-    """Close a SHORT position by buying back on Binance futures."""
+    """Poll Binance until a futures order is filled or timeout expires.
+
+    Returns the final order dict.  Raises ``TimeoutError`` if the order
+    is not fully filled within *timeout* seconds.  On timeout the order
+    is cancelled automatically.
+    """
     exchange = _get_futures_exchange()
-    order_type = "limit" if price else "market"
-    order = exchange.create_order(
-        symbol=symbol,
-        type=order_type,
-        side="buy",
-        amount=qty,
-        price=price,
-        params={"reduceOnly": True},
+    deadline = time.monotonic() + timeout
+
+    while time.monotonic() < deadline:
+        order = exchange.fetch_order(order_id, symbol)
+        status = order.get("status", "")
+        filled = float(order.get("filled", 0))
+        amount = float(order.get("amount", 0))
+
+        logger.debug(
+            "Order %s status=%s filled=%.4f/%.4f",
+            order_id, status, filled, amount,
+        )
+
+        if status == "closed":
+            logger.info("Order %s fully filled (%.4f)", order_id, filled)
+            return order
+
+        if status in ("canceled", "cancelled", "expired", "rejected"):
+            raise RuntimeError(
+                f"Order {order_id} ended with status={status} "
+                f"(filled={filled}/{amount})"
+            )
+
+        time.sleep(poll_interval)
+
+    # Timeout – cancel the unfilled order
+    logger.warning("Order %s timed out after %ds – cancelling", order_id, timeout)
+    try:
+        exchange.cancel_order(order_id, symbol)
+    except Exception:
+        logger.exception("Failed to cancel timed-out order %s", order_id)
+
+    # Re-fetch to see final state
+    order = exchange.fetch_order(order_id, symbol)
+    filled = float(order.get("filled", 0))
+    if filled > 0:
+        raise RuntimeError(
+            f"Order {order_id} partially filled ({filled}) before timeout – "
+            f"manual intervention needed!"
+        )
+    raise TimeoutError(
+        f"Order {order_id} not filled within {timeout}s, cancelled."
     )
-    logger.info(
-        "Futures CLOSE SHORT: %s qty=%.4f price=%s → id=%s",
-        symbol, qty, price, order.get("id"),
-    )
-    return order
 
 
 # ── Combined arbitrage trades ────────────────────────────────────────
@@ -129,13 +185,18 @@ def open_arb_position(
     stock_price: Optional[float] = None,
     futures_price: Optional[float] = None,
 ) -> TradeResult:
-    """Open a hedged position: BUY stock (Bit.com) + SHORT futures (Binance).
+    """Open a hedged position using maker-first execution.
+
+    Execution order (to minimise fees):
+      1. Place limit SELL (short) on Binance futures as **maker** (0% fee)
+      2. Wait for Binance fill
+      3. Place market BUY on Bit.com stock as **taker** (~0.01% fee)
 
     Args:
         pair: The arbitrage pair to trade.
         qty: Number of shares to buy (uses DEFAULT_TRADE_QTY if 0).
-        stock_price: Limit price for the stock order (None = market).
-        futures_price: Limit price for the futures short (None = market).
+        stock_price: Ignored (stock leg always uses market order).
+        futures_price: Limit price for the Binance maker order (required).
 
     Returns:
         A ``TradeResult`` describing both legs.
@@ -145,53 +206,92 @@ def open_arb_position(
 
     futures_qty = qty * pair.shares_per_contract
     now = datetime.now(timezone.utc)
-    stock_order_id = ""
     futures_order_id = ""
+    stock_order_id = ""
     error = ""
+    actual_futures_price: Optional[float] = futures_price
+
+    # ── Leg 1: Binance maker short ───────────────────────────────────
+    if futures_price is None:
+        error = "futures_price is required for maker order"
+        logger.error(error)
+        return TradeResult(
+            timestamp=now, pair=pair, action="OPEN",
+            stock_order_id="", stock_side=SIDE_BUY,
+            stock_qty=qty, stock_price=None,
+            futures_order_id="", futures_side="sell",
+            futures_qty=futures_qty, futures_price=None,
+            success=False, error=error,
+        )
 
     try:
-        # Leg 1: Buy stock on Bit.com
+        fut_order = _place_futures_maker(
+            pair.futures_symbol, "sell", futures_qty, futures_price,
+        )
+        futures_order_id = fut_order.get("id", "")
+
+        # Wait for fill
+        filled_order = _wait_for_fill(futures_order_id, pair.futures_symbol)
+        actual_futures_price = float(filled_order.get("average", futures_price))
+        logger.info(
+            "Binance maker SHORT filled: %s avg_price=%.4f",
+            pair.futures_symbol, actual_futures_price,
+        )
+    except (TimeoutError, RuntimeError) as e:
+        error = f"Binance maker leg failed: {e}"
+        logger.error(error)
+        return TradeResult(
+            timestamp=now, pair=pair, action="OPEN",
+            stock_order_id="", stock_side=SIDE_BUY,
+            stock_qty=qty, stock_price=None,
+            futures_order_id=futures_order_id, futures_side="sell",
+            futures_qty=futures_qty, futures_price=futures_price,
+            success=False, error=error,
+        )
+    except Exception as e:
+        error = f"Binance maker leg failed: {e}"
+        logger.exception("Failed to place/fill Binance maker order for %s", pair.futures_symbol)
+        return TradeResult(
+            timestamp=now, pair=pair, action="OPEN",
+            stock_order_id="", stock_side=SIDE_BUY,
+            stock_qty=qty, stock_price=None,
+            futures_order_id=futures_order_id, futures_side="sell",
+            futures_qty=futures_qty, futures_price=futures_price,
+            success=False, error=error,
+        )
+
+    # ── Leg 2: Bit.com stock taker buy ───────────────────────────────
+    try:
         client = get_bitcom_client()
         stock_order = client.place_order(
             symbol=pair.stock_symbol,
             side=SIDE_BUY,
             qty=qty,
-            price=stock_price,
-            order_type=ORDER_TYPE_LIMIT if stock_price else "MO",
+            price=None,           # market order (taker)
+            order_type="MO",      # market order
             remark=f"arb-open-{pair.ticker}",
         )
         stock_order_id = stock_order.order_id
-        logger.info("Stock BUY placed: %s qty=%d → %s", pair.stock_symbol, qty, stock_order_id)
-    except Exception as e:
-        error = f"Stock leg failed: {e}"
-        logger.exception("Failed to buy stock %s", pair.stock_symbol)
-        return TradeResult(
-            timestamp=now, pair=pair, action="OPEN",
-            stock_order_id="", stock_side=SIDE_BUY,
-            stock_qty=qty, stock_price=stock_price,
-            futures_order_id="", futures_side="sell",
-            futures_qty=futures_qty, futures_price=futures_price,
-            success=False, error=error,
+        logger.info(
+            "Bit.com taker BUY placed: %s qty=%d → %s",
+            pair.stock_symbol, qty, stock_order_id,
         )
-
-    try:
-        # Leg 2: Short futures on Binance
-        fut_order = _short_futures(pair.futures_symbol, futures_qty, futures_price)
-        futures_order_id = fut_order.get("id", "")
     except Exception as e:
-        error = f"Futures leg failed (stock already placed!): {e}"
+        error = (
+            f"Stock taker leg failed (Binance short {futures_order_id} IS LIVE!): {e}"
+        )
         logger.exception(
-            "Failed to short futures %s – STOCK ORDER %s IS LIVE, manual intervention needed!",
-            pair.futures_symbol, stock_order_id,
+            "Failed to buy stock %s – BINANCE SHORT %s IS LIVE, manual intervention needed!",
+            pair.stock_symbol, futures_order_id,
         )
 
     success = bool(stock_order_id and futures_order_id and not error)
     return TradeResult(
         timestamp=now, pair=pair, action="OPEN",
         stock_order_id=stock_order_id, stock_side=SIDE_BUY,
-        stock_qty=qty, stock_price=stock_price,
+        stock_qty=qty, stock_price=None,
         futures_order_id=futures_order_id, futures_side="sell",
-        futures_qty=futures_qty, futures_price=futures_price,
+        futures_qty=futures_qty, futures_price=actual_futures_price,
         success=success, error=error,
     )
 
@@ -202,13 +302,18 @@ def close_arb_position(
     stock_price: Optional[float] = None,
     futures_price: Optional[float] = None,
 ) -> TradeResult:
-    """Close a hedged position: SELL stock (Bit.com) + BUY-BACK futures (Binance).
+    """Close a hedged position using maker-first execution.
+
+    Execution order (to minimise fees):
+      1. Place limit BUY on Binance futures as **maker** (0% fee, reduceOnly)
+      2. Wait for Binance fill
+      3. Place market SELL on Bit.com stock as **taker** (~0.01% fee)
 
     Args:
         pair: The arbitrage pair to close.
         qty: Number of shares to sell (uses DEFAULT_TRADE_QTY if 0).
-        stock_price: Limit price for the stock sell (None = market).
-        futures_price: Limit price for the futures buy-back (None = market).
+        stock_price: Ignored (stock leg always uses market order).
+        futures_price: Limit price for the Binance maker buy-back (required).
 
     Returns:
         A ``TradeResult`` describing both legs.
@@ -218,53 +323,93 @@ def close_arb_position(
 
     futures_qty = qty * pair.shares_per_contract
     now = datetime.now(timezone.utc)
-    stock_order_id = ""
     futures_order_id = ""
+    stock_order_id = ""
     error = ""
+    actual_futures_price: Optional[float] = futures_price
+
+    # ── Leg 1: Binance maker buy-back ────────────────────────────────
+    if futures_price is None:
+        error = "futures_price is required for maker order"
+        logger.error(error)
+        return TradeResult(
+            timestamp=now, pair=pair, action="CLOSE",
+            stock_order_id="", stock_side=SIDE_SELL,
+            stock_qty=qty, stock_price=None,
+            futures_order_id="", futures_side="buy",
+            futures_qty=futures_qty, futures_price=None,
+            success=False, error=error,
+        )
 
     try:
-        # Leg 1: Sell stock on Bit.com
+        fut_order = _place_futures_maker(
+            pair.futures_symbol, "buy", futures_qty, futures_price,
+            reduce_only=True,
+        )
+        futures_order_id = fut_order.get("id", "")
+
+        # Wait for fill
+        filled_order = _wait_for_fill(futures_order_id, pair.futures_symbol)
+        actual_futures_price = float(filled_order.get("average", futures_price))
+        logger.info(
+            "Binance maker BUY-BACK filled: %s avg_price=%.4f",
+            pair.futures_symbol, actual_futures_price,
+        )
+    except (TimeoutError, RuntimeError) as e:
+        error = f"Binance maker close leg failed: {e}"
+        logger.error(error)
+        return TradeResult(
+            timestamp=now, pair=pair, action="CLOSE",
+            stock_order_id="", stock_side=SIDE_SELL,
+            stock_qty=qty, stock_price=None,
+            futures_order_id=futures_order_id, futures_side="buy",
+            futures_qty=futures_qty, futures_price=futures_price,
+            success=False, error=error,
+        )
+    except Exception as e:
+        error = f"Binance maker close leg failed: {e}"
+        logger.exception("Failed to place/fill Binance maker buy-back for %s", pair.futures_symbol)
+        return TradeResult(
+            timestamp=now, pair=pair, action="CLOSE",
+            stock_order_id="", stock_side=SIDE_SELL,
+            stock_qty=qty, stock_price=None,
+            futures_order_id=futures_order_id, futures_side="buy",
+            futures_qty=futures_qty, futures_price=futures_price,
+            success=False, error=error,
+        )
+
+    # ── Leg 2: Bit.com stock taker sell ──────────────────────────────
+    try:
         client = get_bitcom_client()
         stock_order = client.place_order(
             symbol=pair.stock_symbol,
             side=SIDE_SELL,
             qty=qty,
-            price=stock_price,
-            order_type=ORDER_TYPE_LIMIT if stock_price else "MO",
+            price=None,           # market order (taker)
+            order_type="MO",      # market order
             remark=f"arb-close-{pair.ticker}",
         )
         stock_order_id = stock_order.order_id
-        logger.info("Stock SELL placed: %s qty=%d → %s", pair.stock_symbol, qty, stock_order_id)
-    except Exception as e:
-        error = f"Stock sell leg failed: {e}"
-        logger.exception("Failed to sell stock %s", pair.stock_symbol)
-        return TradeResult(
-            timestamp=now, pair=pair, action="CLOSE",
-            stock_order_id="", stock_side=SIDE_SELL,
-            stock_qty=qty, stock_price=stock_price,
-            futures_order_id="", futures_side="buy",
-            futures_qty=futures_qty, futures_price=futures_price,
-            success=False, error=error,
+        logger.info(
+            "Bit.com taker SELL placed: %s qty=%d → %s",
+            pair.stock_symbol, qty, stock_order_id,
         )
-
-    try:
-        # Leg 2: Close short futures on Binance
-        fut_order = _close_short_futures(pair.futures_symbol, futures_qty, futures_price)
-        futures_order_id = fut_order.get("id", "")
     except Exception as e:
-        error = f"Futures close leg failed (stock sell already placed!): {e}"
+        error = (
+            f"Stock taker sell failed (Binance buy-back {futures_order_id} IS DONE!): {e}"
+        )
         logger.exception(
-            "Failed to close futures %s – STOCK SELL %s IS LIVE, manual intervention needed!",
-            pair.futures_symbol, stock_order_id,
+            "Failed to sell stock %s – BINANCE BUY-BACK %s IS DONE, manual intervention needed!",
+            pair.stock_symbol, futures_order_id,
         )
 
     success = bool(stock_order_id and futures_order_id and not error)
     return TradeResult(
         timestamp=now, pair=pair, action="CLOSE",
         stock_order_id=stock_order_id, stock_side=SIDE_SELL,
-        stock_qty=qty, stock_price=stock_price,
+        stock_qty=qty, stock_price=None,
         futures_order_id=futures_order_id, futures_side="buy",
-        futures_qty=futures_qty, futures_price=futures_price,
+        futures_qty=futures_qty, futures_price=actual_futures_price,
         success=success, error=error,
     )
 
@@ -302,12 +447,14 @@ def get_futures_positions() -> dict[str, float]:
 def format_trade_result(tr: TradeResult) -> str:
     """Format a TradeResult for terminal display."""
     status = "✅ SUCCESS" if tr.success else f"❌ FAILED: {tr.error}"
+    stock_price_str = f"@{tr.stock_price:.2f}" if tr.stock_price else "@MKT"
+    futures_price_str = f"@{tr.futures_price:.4f}" if tr.futures_price else "@N/A"
     return (
         f"[{tr.timestamp:%H:%M:%S UTC}] {tr.action} {tr.pair.ticker}  "
-        f"Stock: {tr.stock_side} {tr.stock_qty}sh @{tr.stock_price or 'MKT'} "
+        f"① Futures(maker): {tr.futures_side} {tr.futures_qty:.4f} "
+        f"{futures_price_str} "
+        f"(id={tr.futures_order_id or 'N/A'})  →  "
+        f"② Stock(taker): {tr.stock_side} {tr.stock_qty}sh {stock_price_str} "
         f"(id={tr.stock_order_id or 'N/A'})  |  "
-        f"Futures: {tr.futures_side} {tr.futures_qty:.4f} "
-        f"@{tr.futures_price or 'MKT'} "
-        f"(id={tr.futures_order_id or 'N/A'})  |  "
         f"{status}"
     )

@@ -41,6 +41,14 @@ DEFAULT_TRADE_QTY = int(os.getenv("DEFAULT_TRADE_QTY", "10"))
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
+# ── Maker-first execution parameters ────────────────────────────────
+# Binance TradFi futures: maker fee = 0, taker fee = 0.04%
+# Bit.com stocks: maker/taker ≈ 0.01%
+# Strategy: place Binance limit (maker) order first, wait for fill,
+# then immediately place Bit.com market (taker) order.
+MAKER_ORDER_TIMEOUT = int(os.getenv("MAKER_ORDER_TIMEOUT", "60"))  # seconds
+MAKER_POLL_INTERVAL = float(os.getenv("MAKER_POLL_INTERVAL", "0.5"))  # seconds
+
 # Funding is settled every 8 hours on Binance → 3 × 365 = 1095 periods/year
 FUNDING_PERIODS_PER_YEAR = 3 * 365
 

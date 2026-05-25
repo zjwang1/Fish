@@ -14,12 +14,27 @@ Binance 上线了许多美股代币化合约（如 MUUSDT、AAPLUSDT、TSLAUSDT�
 2. 在 **Binance** 做空同名永续合约（如 MUUSDT）→ 持有空头头寸
 3. 两边对冲，价格涨跌不影响总头寸 → **纯赚资金费率**
 
+## 执行策略：Maker-First（费率优化）
+
+| 平台 | Maker 费率 | Taker 费率 |
+|------|-----------|-----------|
+| Binance TradFi 合约 | **0%** | 0.04% |
+| Bit.com 美股 | ~0.01% | ~0.01% |
+
+为了最小化交易费用，执行顺序为：
+
+1. **先在 Binance 挂 Maker 限价单**（postOnly=true，保证 0% 手续费）
+2. **等待 Binance 成交**（轮询订单状态，超时自动撤单）
+3. **成交后立即在 Bit.com 下 Taker 市价单**（~0.01% 手续费）
+
+这样总手续费仅 **~0.01%**，而不是 Binance taker 的 0.04%。
+
 ## 交易接口
 
 | 功能 | 平台 | API |
 |------|------|-----|
-| 买卖美股 | Bit.com (Matrixport) | `https://mapi.matrixport.com/stock/v1/...` |
-| 做空合约 | Binance | ccxt 库 |
+| 买卖美股 (taker) | Bit.com (Matrixport) | `https://mapi.matrixport.com/stock/v1/...` |
+| 做空合约 (maker) | Binance | ccxt 库 (postOnly) |
 
 Bit.com Stock API 文档: https://www.bit.com/docs/en-us/stock.html#stock-api
 
@@ -66,6 +81,8 @@ cp .env.example .env
 | `MAX_BASIS_PCT` | `1.0` | 最大可接受基差（%），基差过大时不建议新开仓 |
 | `DEFAULT_TRADE_QTY` | `10` | 每笔交易默认股数 |
 | `POLL_INTERVAL` | `10` | 轮询间隔（秒） |
+| `MAKER_ORDER_TIMEOUT` | `60` | Binance maker 单等待成交超时（秒），超时自动撤单 |
+| `MAKER_POLL_INTERVAL` | `0.5` | 轮询 Binance 订单成交状态的间隔（秒） |
 | `LOG_LEVEL` | `INFO` | 日志级别 |
 
 ## 使用
@@ -93,9 +110,11 @@ python main.py --positions
 仅显示行情 + 信号，不下单。适合观察和调参。
 
 ### 交易模式 (`--trade`)
-根据信号自动执行：
-- **ENTER 信号** → 在 Bit.com 买入正股 + 在 Binance 做空合约
-- **EXIT 信号** → 在 Bit.com 卖出正股 + 在 Binance 平仓合约
+根据信号自动执行（Maker-First 策略）：
+- **ENTER 信号** → ① 在 Binance 挂 maker 限价空单 → ② 等待成交 → ③ 在 Bit.com taker 市价买入正股
+- **EXIT 信号** → ① 在 Binance 挂 maker 限价买回平仓 → ② 等待成交 → ③ 在 Bit.com taker 市价卖出正股
+
+如果 Binance maker 单在 `MAKER_ORDER_TIMEOUT` 秒内未成交，自动撤单，不执行美股侧。
 
 ### 持仓查看 (`--positions`)
 显示两个平台的当前仓位，确认对冲是否平衡。
