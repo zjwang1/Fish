@@ -46,6 +46,7 @@ from config import (
     DEFAULT_TRADE_QTY,
     MAKER_ORDER_TIMEOUT,
     MAKER_POLL_INTERVAL,
+    MAX_POSITION_VALUE_USD,
     MAX_STOCK_RETRIES,
 )
 from bitcom_client import SIDE_BUY, SIDE_SELL
@@ -281,6 +282,27 @@ def open_arb_position(
     """
     if qty <= 0:
         qty = DEFAULT_TRADE_QTY
+
+    # ── Position value limit check ──────────────────────────────────
+    if MAX_POSITION_VALUE_USD > 0 and futures_price is not None:
+        current_value = get_total_futures_position_value()
+        new_trade_value = qty * pair.shares_per_contract * futures_price
+        projected = current_value + new_trade_value
+        if projected > MAX_POSITION_VALUE_USD:
+            error = (
+                f"Position value limit exceeded: current ${current_value:,.0f} "
+                f"+ new ${new_trade_value:,.0f} = ${projected:,.0f} > "
+                f"limit ${MAX_POSITION_VALUE_USD:,.0f}"
+            )
+            logger.warning(error)
+            return TradeResult(
+                timestamp=datetime.now(timezone.utc), pair=pair, action="OPEN",
+                stock_order_id="", stock_side=SIDE_BUY,
+                stock_qty=0, stock_price=None,
+                futures_order_id="", futures_side="sell",
+                futures_qty=0, futures_price=None,
+                success=False, error=error,
+            )
 
     futures_qty = qty * pair.shares_per_contract
     now = datetime.now(timezone.utc)
@@ -531,6 +553,28 @@ def get_futures_positions() -> dict[str, float]:
         return {}
 
 
+def get_total_futures_position_value() -> float:
+    """Return the total notional value (USD) of all Binance futures positions.
+
+    Uses mark price × abs(contracts) × shares_per_contract for each pair.
+    This gives a rough USD value of total exposure on the futures side,
+    which is the relevant metric for liquidation risk.
+    """
+    try:
+        exchange = _get_futures_exchange()
+        positions = exchange.fetch_positions()
+        total = 0.0
+        for p in positions:
+            contracts = float(p.get("contracts", 0))
+            if contracts > 0:
+                notional = float(p.get("notional", 0))
+                total += abs(notional)
+        return total
+    except Exception:
+        logger.exception("Failed to calculate total futures position value")
+        return 0.0
+
+
 # ── Hedge balance check ─────────────────────────────────────────────
 
 @dataclass
@@ -603,7 +647,20 @@ def format_hedge_status(statuses: list[HedgeStatus]) -> str:
         if any_imbalance
         else "  ✅ All positions perfectly hedged (zero exposure)"
     )
-    return header + "\n" + "\n".join(lines)
+    result = header + "\n" + "\n".join(lines)
+
+    # Append position value limit info
+    if MAX_POSITION_VALUE_USD > 0:
+        total_value = get_total_futures_position_value()
+        pct = (total_value / MAX_POSITION_VALUE_USD) * 100
+        limit_icon = "🟢" if pct < 80 else ("🟡" if pct < 100 else "🔴")
+        result += (
+            f"\n  {limit_icon} Total futures notional: "
+            f"${total_value:,.0f} / ${MAX_POSITION_VALUE_USD:,.0f} "
+            f"({pct:.0f}%)"
+        )
+
+    return result
 
 
 def format_trade_result(tr: TradeResult) -> str:

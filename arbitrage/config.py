@@ -51,6 +51,10 @@ MAKER_POLL_INTERVAL = float(os.getenv("MAKER_POLL_INTERVAL", "0.5"))  # seconds
 # Maximum retries for the stock (Bit.com) leg after Binance fills.
 # Critical for zero-exposure: we MUST hedge the Binance fill on the stock side.
 MAX_STOCK_RETRIES = int(os.getenv("MAX_STOCK_RETRIES", "5"))
+# Maximum total position notional value (USD) across all pairs.
+# Prevents over-leveraging that could lead to futures liquidation.
+# Set to 0 to disable the limit.
+MAX_POSITION_VALUE_USD = float(os.getenv("MAX_POSITION_VALUE_USD", "0"))
 
 # Funding is settled every 8 hours on Binance → 3 × 365 = 1095 periods/year
 FUNDING_PERIODS_PER_YEAR = 3 * 365
