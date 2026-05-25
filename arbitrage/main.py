@@ -115,6 +115,8 @@ def _execute_signals(snapshots: list[FundingSnapshot]) -> None:
         close_arb_position,
         format_trade_result,
         get_stock_positions,
+        check_hedge_balance,
+        format_hedge_status,
     )
 
     # Get current stock positions to avoid duplicates
@@ -147,10 +149,23 @@ def _execute_signals(snapshots: list[FundingSnapshot]) -> None:
                 )
                 print(f"  {format_trade_result(result)}")
 
+    # After all trades, verify hedge balance
+    print("\n  ── Hedge Balance Check ──")
+    try:
+        statuses = check_hedge_balance()
+        print(format_hedge_status(statuses))
+    except Exception:
+        print("  ⚠️  Failed to check hedge balance")
+
 
 def show_positions() -> None:
-    """Display current positions on both Bit.com and Binance."""
-    from trader import get_stock_positions, get_futures_positions
+    """Display current positions on both Bit.com and Binance, with hedge check."""
+    from trader import (
+        get_stock_positions,
+        get_futures_positions,
+        check_hedge_balance,
+        format_hedge_status,
+    )
 
     print("\n╔══════════════════════════════════════════════╗")
     print("║           Current Positions                  ║")
@@ -172,6 +187,13 @@ def show_positions() -> None:
             print(f"    {symbol:20s}  {direction} qty={abs(qty):.4f}")
     else:
         print("    (none)")
+
+    print("\n  ── Hedge Balance ──")
+    try:
+        statuses = check_hedge_balance()
+        print(format_hedge_status(statuses))
+    except Exception:
+        print("  ⚠️  Failed to check hedge balance")
 
     print()
 

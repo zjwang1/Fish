@@ -29,6 +29,15 @@ Binance 上线了许多美股代币化合约（如 MUUSDT、AAPLUSDT、TSLAUSDT�
 
 这样总手续费仅 **~0.01%**，而不是 Binance taker 的 0.04%。
 
+## 严格零敞口（Zero Exposure）
+
+系统保证美股头寸和 Binance 合约头寸**严格对冲**，绝不出现裸露敞口：
+
+1. **部分成交处理**：如果 Binance maker 单在超时前只部分成交，系统会**仅用已成交数量**去 Bit.com 下单，确保两边完全匹配
+2. **Stock 下单重试**：Binance 成交后，如果 Bit.com 市价单失败，系统会自动重试（最多 `MAX_STOCK_RETRIES` 次，指数退避），确保对冲完成
+3. **头寸对账**：`check_hedge_balance()` 实时比较两边仓位，`--positions` 命令会显示对冲状态
+4. **CRITICAL 告警**：如果重试全部失败，系统记录 CRITICAL 级别日志，提示需要人工干预
+
 ## 交易接口
 
 | 功能 | 平台 | API |
@@ -83,6 +92,7 @@ cp .env.example .env
 | `POLL_INTERVAL` | `10` | 轮询间隔（秒） |
 | `MAKER_ORDER_TIMEOUT` | `60` | Binance maker 单等待成交超时（秒），超时自动撤单 |
 | `MAKER_POLL_INTERVAL` | `0.5` | 轮询 Binance 订单成交状态的间隔（秒） |
+| `MAX_STOCK_RETRIES` | `5` | Binance 成交后 Bit.com 下单失败的最大重试次数（确保零敞口） |
 | `LOG_LEVEL` | `INFO` | 日志级别 |
 
 ## 使用

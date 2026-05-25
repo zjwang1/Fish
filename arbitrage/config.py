@@ -48,6 +48,9 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 # then immediately place Bit.com market (taker) order.
 MAKER_ORDER_TIMEOUT = int(os.getenv("MAKER_ORDER_TIMEOUT", "60"))  # seconds
 MAKER_POLL_INTERVAL = float(os.getenv("MAKER_POLL_INTERVAL", "0.5"))  # seconds
+# Maximum retries for the stock (Bit.com) leg after Binance fills.
+# Critical for zero-exposure: we MUST hedge the Binance fill on the stock side.
+MAX_STOCK_RETRIES = int(os.getenv("MAX_STOCK_RETRIES", "5"))
 
 # Funding is settled every 8 hours on Binance → 3 × 365 = 1095 periods/year
 FUNDING_PERIODS_PER_YEAR = 3 * 365
