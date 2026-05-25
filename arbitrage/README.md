@@ -43,7 +43,7 @@ Binance 上线了许多美股代币化合约（如 MUUSDT、AAPLUSDT、TSLAUSDT�
 | 功能 | 平台 | API |
 |------|------|-----|
 | 买卖美股 (taker) | Bit.com (Matrixport) | `https://mapi.matrixport.com/stock/v1/...` |
-| 做空合约 (maker) | Binance | ccxt 库 (postOnly) |
+| 做空合约 (maker) | Binance | 直接 REST API (postOnly) |
 
 Bit.com Stock API 文档: https://www.bit.com/docs/en-us/stock.html#stock-api
 

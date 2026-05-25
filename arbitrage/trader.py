@@ -35,22 +35,18 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
-import ccxt
-
 from config import (
     ArbPair,
     ARB_PAIRS,
-    BINANCE_API_KEY,
-    BINANCE_API_SECRET,
-    BINANCE_TESTNET,
     DEFAULT_TRADE_QTY,
     MAKER_ORDER_TIMEOUT,
     MAKER_POLL_INTERVAL,
     MAX_POSITION_VALUE_USD,
     MAX_STOCK_RETRIES,
 )
+from binance_client import BinanceFuturesClient
 from bitcom_client import SIDE_BUY, SIDE_SELL
-from price_fetcher import get_bitcom_client
+from price_fetcher import get_bitcom_client, get_binance_client
 
 logger = logging.getLogger(__name__)
 
@@ -77,29 +73,6 @@ class TradeResult:
 
 # ── Binance futures trading ──────────────────────────────────────────
 
-_futures_exchange: Optional[ccxt.binance] = None
-
-
-def _get_futures_exchange() -> ccxt.binance:
-    """Return a ccxt Binance Futures client for trading."""
-    global _futures_exchange
-    if _futures_exchange is None:
-        config = {
-            "apiKey": BINANCE_API_KEY,
-            "secret": BINANCE_API_SECRET,
-            "options": {"defaultType": "future"},
-            "enableRateLimit": True,
-        }
-        _futures_exchange = ccxt.binance(config)
-        if BINANCE_TESTNET:
-            _futures_exchange.set_sandbox_mode(True)
-        try:
-            _futures_exchange.load_markets()
-        except Exception as e:
-            _futures_exchange = None
-            raise
-    return _futures_exchange
-
 
 def _place_futures_maker(
     symbol: str,
@@ -110,30 +83,27 @@ def _place_futures_maker(
 ) -> dict:
     """Place a limit (maker) order on Binance perpetual futures.
 
-    Always uses ``postOnly=True`` to guarantee maker execution (0% fee).
+    Always uses ``postOnly`` (GTX) to guarantee maker execution (0% fee).
     """
-    exchange = _get_futures_exchange()
-    params: dict = {"postOnly": True}
-    if reduce_only:
-        params["reduceOnly"] = True
-
-    order = exchange.create_order(
+    client = get_binance_client()
+    order = client.place_order(
         symbol=symbol,
-        type="limit",
         side=side,
-        amount=qty,
+        qty=qty,
+        order_type="LIMIT",
         price=price,
-        params=params,
+        post_only=True,
+        reduce_only=reduce_only,
     )
     logger.info(
         "Futures MAKER %s: %s qty=%.4f price=%.4f postOnly=True → id=%s",
-        side.upper(), symbol, qty, price, order.get("id"),
+        side.upper(), symbol, qty, price, order.get("orderId"),
     )
     return order
 
 
 def _wait_for_fill(
-    order_id: str,
+    order_id: int,
     symbol: str,
     timeout: int = MAKER_ORDER_TIMEOUT,
     poll_interval: float = MAKER_POLL_INTERVAL,
@@ -142,35 +112,33 @@ def _wait_for_fill(
 
     Returns the final order dict.  On timeout:
       • If **partially filled** → cancels the remaining qty, returns
-        the order with ``filled > 0``.  The caller MUST hedge only
+        the order with ``executedQty > 0``.  The caller MUST hedge only
         the filled amount.
       • If **zero fill** → cancels and raises ``TimeoutError``.
 
     Raises ``RuntimeError`` for unexpected terminal states (cancelled
     externally, rejected, etc.).
     """
-    exchange = _get_futures_exchange()
+    client = get_binance_client()
     deadline = time.monotonic() + timeout
 
     while time.monotonic() < deadline:
-        order = exchange.fetch_order(order_id, symbol)
+        order = client.fetch_order(symbol, order_id)
         status = order.get("status", "")
-        filled = float(order.get("filled", 0))
-        amount = float(order.get("amount", 0))
+        filled = float(order.get("executedQty", 0))
+        amount = float(order.get("origQty", 0))
 
         logger.debug(
             "Order %s status=%s filled=%.4f/%.4f",
             order_id, status, filled, amount,
         )
 
-        if status == "closed":
+        if status == "FILLED":
             logger.info("Order %s fully filled (%.4f)", order_id, filled)
             return order
 
-        if status in ("canceled", "cancelled", "expired", "rejected"):
+        if status in ("CANCELED", "CANCELLED", "EXPIRED", "REJECTED"):
             if filled > 0:
-                # Externally cancelled but partially filled → caller
-                # must still hedge the filled portion.
                 logger.warning(
                     "Order %s %s with partial fill %.4f/%.4f",
                     order_id, status, filled, amount,
@@ -186,19 +154,18 @@ def _wait_for_fill(
     # Timeout – cancel the remaining unfilled portion
     logger.warning("Order %s timed out after %ds – cancelling remainder", order_id, timeout)
     try:
-        exchange.cancel_order(order_id, symbol)
+        client.cancel_order(symbol, order_id)
     except Exception:
         logger.exception("Failed to cancel timed-out order %s", order_id)
 
     # Re-fetch to see final state (including any fill that snuck in)
-    order = exchange.fetch_order(order_id, symbol)
-    filled = float(order.get("filled", 0))
+    order = client.fetch_order(symbol, order_id)
+    filled = float(order.get("executedQty", 0))
     if filled > 0:
-        # Partial fill → return it; caller hedges exactly this amount
         logger.warning(
             "Order %s partially filled (%.4f/%.4f) before timeout – "
             "will hedge partial quantity",
-            order_id, filled, float(order.get("amount", 0)),
+            order_id, filled, float(order.get("origQty", 0)),
         )
         return order
     raise TimeoutError(
@@ -333,12 +300,12 @@ def open_arb_position(
         fut_order = _place_futures_maker(
             pair.futures_symbol, "sell", futures_qty, futures_price,
         )
-        futures_order_id = fut_order.get("id", "")
+        futures_order_id = str(fut_order.get("orderId", ""))
 
         # Wait for fill (may be full or partial)
-        filled_order = _wait_for_fill(futures_order_id, pair.futures_symbol)
-        actual_futures_filled = float(filled_order.get("filled", 0))
-        actual_futures_price = float(filled_order.get("average", futures_price))
+        filled_order = _wait_for_fill(fut_order["orderId"], pair.futures_symbol)
+        actual_futures_filled = float(filled_order.get("executedQty", 0))
+        actual_futures_price = float(filled_order.get("avgPrice", 0) or futures_price)
 
         # Compute the exact stock qty to hedge
         actual_stock_qty = int(actual_futures_filled / pair.shares_per_contract)
@@ -456,12 +423,12 @@ def close_arb_position(
             pair.futures_symbol, "buy", futures_qty, futures_price,
             reduce_only=True,
         )
-        futures_order_id = fut_order.get("id", "")
+        futures_order_id = str(fut_order.get("orderId", ""))
 
         # Wait for fill (may be full or partial)
-        filled_order = _wait_for_fill(futures_order_id, pair.futures_symbol)
-        actual_futures_filled = float(filled_order.get("filled", 0))
-        actual_futures_price = float(filled_order.get("average", futures_price))
+        filled_order = _wait_for_fill(fut_order["orderId"], pair.futures_symbol)
+        actual_futures_filled = float(filled_order.get("executedQty", 0))
+        actual_futures_price = float(filled_order.get("avgPrice", 0) or futures_price)
 
         # Compute the exact stock qty to sell (must match futures)
         actual_stock_qty = int(actual_futures_filled / pair.shares_per_contract)
@@ -538,18 +505,27 @@ def get_stock_positions() -> dict[str, float]:
 def get_futures_positions() -> dict[str, float]:
     """Return a dict of {symbol: qty} for all Binance futures positions.
 
-    Negative qty = short position.
+    Negative qty = short position.  Symbol keys use the unified format
+    from ``ArbPair.futures_symbol`` when a match is found, otherwise
+    the raw Binance symbol.
     """
     try:
-        exchange = _get_futures_exchange()
-        positions = exchange.fetch_positions()
+        client = get_binance_client()
+        positions = client.get_positions()
+        # Build a quick lookup: raw symbol → unified symbol
+        from config import ARB_PAIRS as _pairs  # local import to avoid circular
+        raw_to_unified = {}
+        for p in _pairs:
+            from binance_client import _to_raw_symbol
+            raw_to_unified[_to_raw_symbol(p.futures_symbol)] = p.futures_symbol
+
         result = {}
         for p in positions:
-            contracts = float(p.get("contracts", 0))
-            side = p.get("side", "")
-            if contracts > 0:
-                qty = -contracts if side == "short" else contracts
-                result[p["symbol"]] = qty
+            amt = float(p.get("positionAmt", 0))
+            if amt != 0:
+                raw_sym = p.get("symbol", "")
+                key = raw_to_unified.get(raw_sym, raw_sym)
+                result[key] = amt  # already signed (negative = short)
         return result
     except Exception:
         logger.exception("Failed to fetch Binance futures positions")
@@ -559,17 +535,17 @@ def get_futures_positions() -> dict[str, float]:
 def get_total_futures_position_value() -> float:
     """Return the total notional value (USD) of all Binance futures positions.
 
-    Uses mark price × abs(contracts) × shares_per_contract for each pair.
+    Uses notional (mark price × position amount) for each position.
     This gives a rough USD value of total exposure on the futures side,
     which is the relevant metric for liquidation risk.
     """
     try:
-        exchange = _get_futures_exchange()
-        positions = exchange.fetch_positions()
+        client = get_binance_client()
+        positions = client.get_positions()
         total = 0.0
         for p in positions:
-            contracts = float(p.get("contracts", 0))
-            if contracts > 0:
+            amt = float(p.get("positionAmt", 0))
+            if amt != 0:
                 notional = float(p.get("notional", 0))
                 total += abs(notional)
         return total

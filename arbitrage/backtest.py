@@ -99,7 +99,7 @@ BINANCE_FAPI_BASE = "https://fapi.binance.com"
 
 
 def _unified_to_binance(symbol: str) -> str:
-    """Convert ccxt unified symbol to Binance raw symbol.
+    """Convert unified symbol to Binance raw symbol.
 
     Examples:
         'MU/USDT:USDT' → 'MUUSDT'
