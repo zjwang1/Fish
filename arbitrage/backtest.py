@@ -122,9 +122,14 @@ def fetch_all_funding_history(
     cursor = since_ms
 
     while cursor < until_ms:
-        batch = exchange.fetch_funding_rate_history(
-            symbol, since=cursor, limit=1000,
-        )
+        try:
+            batch = exchange.fetch_funding_rate_history(
+                symbol, since=cursor, limit=1000,
+            )
+        except Exception as e:
+            logger.error("Failed to fetch funding history for %s: %s", symbol, e)
+            break
+
         if not batch:
             break
 
@@ -473,12 +478,17 @@ def main() -> None:
     results: list[BacktestResult] = []
 
     for pair in pairs:
-        result = run_pair_backtest(
-            exchange, pair, args.days,
-            min_funding_apy=min_apy,
-            max_basis_pct=max_basis,
-            avg_window=args.avg_window,
-        )
+        try:
+            result = run_pair_backtest(
+                exchange, pair, args.days,
+                min_funding_apy=min_apy,
+                max_basis_pct=max_basis,
+                avg_window=args.avg_window,
+            )
+        except Exception as e:
+            logger.error("Backtest failed for %s: %s", pair.ticker, e)
+            result = None
+
         if result is not None:
             results.append(result)
             if args.verbose:
