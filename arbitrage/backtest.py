@@ -219,9 +219,9 @@ def run_pair_backtest(
         avg_rate = sum(window_rates) / len(window_rates)
         avg_apy = avg_rate * FUNDING_PERIODS_PER_YEAR * 100.0
 
-        # Basis: in backtest we don't have separate stock price data,
-        # so basis PnL is assumed zero (stock ≈ futures for TradFi perps).
-        # The primary PnL source is funding payments.
+        # Hedged strategy: LONG stock + SHORT futures.  Since we use
+        # the same mark price for both legs, directional price moves
+        # cancel out → basis PnL = 0.  The sole PnL source is funding.
 
         if not in_position:
             # ── Entry signal ─────────────────────────────────────────
@@ -244,9 +244,13 @@ def run_pair_backtest(
                 hold_hours = (exit_time - entry_time).total_seconds() / 3600
                 funding_pnl_pct = cumulative_funding * 100.0
 
-                # Basis PnL: (entry_futures - exit_futures) / entry_price
-                # For short futures: profit when price drops
-                basis_pnl_pct = ((entry_price - exit_price) / entry_price) * 100.0
+                # Basis PnL: In a hedged strategy (LONG stock + SHORT futures),
+                # the stock and futures prices move together, so directional
+                # price moves cancel out.  Since we use the same mark price
+                # as proxy for both legs, the hedged basis PnL is 0.
+                # (Short futures loses when price rises, but long stock gains
+                #  the same amount — net directional exposure = 0.)
+                basis_pnl_pct = 0.0
 
                 fee_pct = ROUND_TRIP_FEE_PCT
                 net_pnl_pct = funding_pnl_pct + basis_pnl_pct - fee_pct
@@ -277,7 +281,8 @@ def run_pair_backtest(
 
         hold_hours = (exit_time - entry_time).total_seconds() / 3600
         funding_pnl_pct = cumulative_funding * 100.0
-        basis_pnl_pct = ((entry_price - exit_price) / entry_price) * 100.0 if entry_price > 0 else 0
+        # Hedged strategy: stock + futures cancel out directional moves
+        basis_pnl_pct = 0.0
         fee_pct = ROUND_TRIP_FEE_PCT
         net_pnl_pct = funding_pnl_pct + basis_pnl_pct - fee_pct
 
