@@ -44,6 +44,7 @@ from config import (
     BINANCE_API_SECRET,
     BINANCE_TESTNET,
     DEFAULT_TRADE_QTY,
+    HTTPS_PROXY,
     MAKER_ORDER_TIMEOUT,
     MAKER_POLL_INTERVAL,
     MAX_POSITION_VALUE_USD,
@@ -84,14 +85,15 @@ def _get_futures_exchange() -> ccxt.binance:
     """Return a ccxt Binance Futures client for trading."""
     global _futures_exchange
     if _futures_exchange is None:
-        _futures_exchange = ccxt.binance(
-            {
-                "apiKey": BINANCE_API_KEY,
-                "secret": BINANCE_API_SECRET,
-                "options": {"defaultType": "future"},
-                "enableRateLimit": True,
-            }
-        )
+        config = {
+            "apiKey": BINANCE_API_KEY,
+            "secret": BINANCE_API_SECRET,
+            "options": {"defaultType": "future"},
+            "enableRateLimit": True,
+        }
+        if HTTPS_PROXY:
+            config["proxies"] = {"https": HTTPS_PROXY, "http": HTTPS_PROXY}
+        _futures_exchange = ccxt.binance(config)
         if BINANCE_TESTNET:
             _futures_exchange.set_sandbox_mode(True)
         _futures_exchange.load_markets()

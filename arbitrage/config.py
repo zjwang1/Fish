@@ -30,6 +30,11 @@ BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 BINANCE_TESTNET = os.getenv("BINANCE_TESTNET", "true").lower() == "true"
 
+# ── Network / proxy ──────────────────────────────────────────────────
+# Set HTTPS_PROXY (e.g. "http://127.0.0.1:7890") when Binance API is
+# not directly reachable (common in mainland China).
+HTTPS_PROXY = os.getenv("HTTPS_PROXY", "") or os.getenv("https_proxy", "")
+
 # ── Strategy parameters ──────────────────────────────────────────────
 # Minimum annualised funding-rate yield (%) to consider entry
 MIN_FUNDING_APY = float(os.getenv("MIN_FUNDING_APY", "10.0"))

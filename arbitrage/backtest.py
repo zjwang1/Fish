@@ -43,6 +43,7 @@ from config import (
     BINANCE_API_SECRET,
     BINANCE_TESTNET,
     FUNDING_PERIODS_PER_YEAR,
+    HTTPS_PROXY,
     MAX_BASIS_PCT,
     MIN_FUNDING_APY,
 )
@@ -97,12 +98,15 @@ class BacktestResult:
 # ── Exchange helper ──────────────────────────────────────────────────
 
 def _make_exchange() -> ccxt.binance:
-    exchange = ccxt.binance({
+    config = {
         "apiKey": BINANCE_API_KEY,
         "secret": BINANCE_API_SECRET,
         "options": {"defaultType": "future"},
         "enableRateLimit": True,
-    })
+    }
+    if HTTPS_PROXY:
+        config["proxies"] = {"https": HTTPS_PROXY, "http": HTTPS_PROXY}
+    exchange = ccxt.binance(config)
     if BINANCE_TESTNET:
         exchange.set_sandbox_mode(True)
     exchange.load_markets()
