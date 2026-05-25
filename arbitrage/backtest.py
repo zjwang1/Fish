@@ -8,7 +8,9 @@ returns.  No API key required – only public endpoints are used.
 
 Signal logic (mirrors spread_monitor.py):
   ENTER – avg funding APY ≥ MIN_FUNDING_APY  AND  |basis| ≤ MAX_BASIS_PCT
-  EXIT  – rolling-average funding APY < 0 (trend turned negative)
+  EXIT  – rolling-average funding APY < 0
+          AND held ≥ MIN_HOLD_PERIODS (default 48 h)
+          AND cumulative funding already covers round-trip fee
 
 Assumptions / simplifications:
   • Stock price is approximated by futures mark price (no separate stock
@@ -44,6 +46,7 @@ from config import (
     FUNDING_PERIODS_PER_YEAR,
     MAX_BASIS_PCT,
     MIN_FUNDING_APY,
+    MIN_HOLD_PERIODS,
 )
 
 logging.basicConfig(
@@ -172,6 +175,7 @@ def run_pair_backtest(
     min_funding_apy: float,
     max_basis_pct: float,
     avg_window: int = 30,
+    min_hold_periods: int = MIN_HOLD_PERIODS,
 ) -> Optional[BacktestResult]:
     """Run backtest for a single pair."""
 
@@ -207,6 +211,11 @@ def run_pair_backtest(
     in_position = False
     entry_idx = 0
     cumulative_funding = 0.0
+    periods_held = 0
+
+    # Fee breakeven: cumulative funding (as fraction, not %) must exceed
+    # round-trip fee before we consider closing.
+    fee_breakeven = ROUND_TRIP_FEE_PCT / 100.0   # 0.0002
 
     for i in range(avg_window, len(records)):
         rate = rates[i]
@@ -229,15 +238,24 @@ def run_pair_backtest(
                 in_position = True
                 entry_idx = i
                 cumulative_funding = 0.0
+                periods_held = 0
         else:
             # Collect funding
             cumulative_funding += rate
+            periods_held += 1
 
             # ── Exit signal ──────────────────────────────────────────
-            # Exit when rolling-average APY turns negative (symmetric
-            # with entry logic).  A single negative 8-h rate is noise;
-            # only exit when the trend is genuinely unfavourable.
-            if avg_apy < 0:
+            # Three guards prevent premature exits that waste fees:
+            #  1. Minimum hold period (MIN_HOLD_PERIODS, default 48 h)
+            #  2. Rolling-average APY must be negative (trend, not noise)
+            #  3. Fee-breakeven: cumulative funding must have covered the
+            #     round-trip fee – otherwise closing locks in a net loss
+            can_exit = (
+                periods_held >= min_hold_periods
+                and avg_apy < 0
+                and cumulative_funding >= fee_breakeven
+            )
+            if can_exit:
                 entry_time = timestamps[entry_idx]
                 exit_time = timestamps[i]
                 entry_price = prices[entry_idx]
@@ -467,6 +485,11 @@ def main() -> None:
         help="Rolling window size for avg funding rate (default: 30 periods = 10 days)",
     )
     parser.add_argument(
+        "--min-hold", type=int, default=None,
+        help=f"Minimum hold periods before exit is considered "
+             f"(default: {MIN_HOLD_PERIODS}, each period = 8 h)",
+    )
+    parser.add_argument(
         "--csv", type=str, default=None, metavar="FILE",
         help="Export trade details to a CSV file",
     )
@@ -478,6 +501,7 @@ def main() -> None:
 
     min_apy = args.min_apy if args.min_apy is not None else MIN_FUNDING_APY
     max_basis = args.max_basis if args.max_basis is not None else MAX_BASIS_PCT
+    min_hold = args.min_hold if args.min_hold is not None else MIN_HOLD_PERIODS
 
     # Filter pairs
     pairs = ARB_PAIRS
@@ -496,9 +520,10 @@ def main() -> None:
     print("╚══════════════════════════════════════════════════════════════════╝")
     print(f"  Period: {args.days} days  |  Min APY: {min_apy:.1f}%  |  "
           f"Max Basis: {max_basis:.1f}%  |  Avg Window: {args.avg_window}")
-    print(f"  Pairs: {len(pairs)}  |  Fees: {ROUND_TRIP_FEE_PCT:.2f}% round-trip")
+    print(f"  Pairs: {len(pairs)}  |  Fees: {ROUND_TRIP_FEE_PCT:.2f}% round-trip  |  "
+          f"Min Hold: {min_hold} periods ({min_hold * 8}h)")
     print(f"  Signal: ENTER when avg_funding_apy ≥ {min_apy:.1f}%")
-    print(f"          EXIT  when avg_funding_apy < 0")
+    print(f"          EXIT  when avg_funding_apy < 0 AND held ≥ {min_hold} periods AND fees covered")
 
     results: list[BacktestResult] = []
 
@@ -509,6 +534,7 @@ def main() -> None:
                 min_funding_apy=min_apy,
                 max_basis_pct=max_basis,
                 avg_window=args.avg_window,
+                min_hold_periods=min_hold,
             )
         except Exception as e:
             logger.error("Backtest failed for %s: %s", pair.ticker, e)

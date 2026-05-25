@@ -56,6 +56,12 @@ MAX_STOCK_RETRIES = int(os.getenv("MAX_STOCK_RETRIES", "5"))
 # Set to 0 to disable the limit.
 MAX_POSITION_VALUE_USD = float(os.getenv("MAX_POSITION_VALUE_USD", "0"))
 
+# Minimum number of 8-h funding periods to hold before considering exit.
+# Prevents churning: at 10 % APY each period yields ~0.009 %, so you need
+# ≥ 3 periods just to cover the 0.02 % round-trip fee.  Default 6 (= 48 h)
+# gives a comfortable 2× margin above breakeven.
+MIN_HOLD_PERIODS = int(os.getenv("MIN_HOLD_PERIODS", "6"))
+
 # Funding is settled every 8 hours on Binance → 3 × 365 = 1095 periods/year
 FUNDING_PERIODS_PER_YEAR = 3 * 365
 

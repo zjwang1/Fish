@@ -19,9 +19,13 @@ import csv
 import logging
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
-from config import ARB_PAIRS, POLL_INTERVAL, LOG_LEVEL, MIN_FUNDING_APY, MAX_BASIS_PCT
+from config import (
+    ARB_PAIRS, POLL_INTERVAL, LOG_LEVEL,
+    MIN_FUNDING_APY, MAX_BASIS_PCT, MIN_HOLD_PERIODS,
+)
 from spread_monitor import compute_snapshot, format_snapshot, FundingSnapshot
 
 
@@ -108,6 +112,14 @@ def run_once(
                 writer.writerow(_snap_to_row(snap))
 
 
+# Track when each position was opened (symbol → datetime) so we can
+# enforce the minimum hold period before acting on EXIT signals.
+_position_entry_times: dict[str, datetime] = {}
+
+# Minimum hold before exit = MIN_HOLD_PERIODS × 8 hours
+_MIN_HOLD_SECONDS = MIN_HOLD_PERIODS * 8 * 3600
+
+
 def _execute_signals(snapshots: list[FundingSnapshot]) -> None:
     """Execute trades based on signals (only when --trade is enabled)."""
     from trader import (
@@ -125,6 +137,8 @@ def _execute_signals(snapshots: list[FundingSnapshot]) -> None:
     except Exception:
         stock_positions = {}
 
+    now = datetime.now(timezone.utc)
+
     for snap in snapshots:
         has_position = snap.pair.stock_symbol in stock_positions
 
@@ -136,8 +150,21 @@ def _execute_signals(snapshots: list[FundingSnapshot]) -> None:
                 futures_price=snap.futures_price,
             )
             print(f"  {format_trade_result(result)}")
+            # Record entry time for min-hold enforcement
+            _position_entry_times[snap.pair.stock_symbol] = now
 
         elif snap.signal == "EXIT" and has_position:
+            # ── Min-hold guard ───────────────────────────────────────
+            entry_time = _position_entry_times.get(snap.pair.stock_symbol)
+            if entry_time is not None:
+                held_seconds = (now - entry_time).total_seconds()
+                if held_seconds < _MIN_HOLD_SECONDS:
+                    held_h = held_seconds / 3600
+                    min_h = _MIN_HOLD_SECONDS / 3600
+                    print(f"\n  ⏳ Skipping EXIT for {snap.pair.ticker}: "
+                          f"held {held_h:.0f}h < min {min_h:.0f}h")
+                    continue
+
             print(f"\n  📉 Closing position: {snap.pair.ticker} ...")
             qty = int(stock_positions.get(snap.pair.stock_symbol, 0))
             if qty > 0:
@@ -148,6 +175,8 @@ def _execute_signals(snapshots: list[FundingSnapshot]) -> None:
                     futures_price=snap.futures_price,
                 )
                 print(f"  {format_trade_result(result)}")
+                # Remove entry time record
+                _position_entry_times.pop(snap.pair.stock_symbol, None)
 
     # After all trades, verify hedge balance
     print("\n  ── Hedge Balance Check ──")
