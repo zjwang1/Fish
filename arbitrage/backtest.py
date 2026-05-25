@@ -8,7 +8,7 @@ returns.  No API key required – only public endpoints are used.
 
 Signal logic (mirrors spread_monitor.py):
   ENTER – avg funding APY ≥ MIN_FUNDING_APY  AND  |basis| ≤ MAX_BASIS_PCT
-  EXIT  – current funding rate < 0 (shorts are paying)
+  EXIT  – rolling-average funding APY < 0 (trend turned negative)
 
 Assumptions / simplifications:
   • Stock price is approximated by futures mark price (no separate stock
@@ -234,8 +234,10 @@ def run_pair_backtest(
             cumulative_funding += rate
 
             # ── Exit signal ──────────────────────────────────────────
-            # Exit if current rate goes negative
-            if rate < 0:
+            # Exit when rolling-average APY turns negative (symmetric
+            # with entry logic).  A single negative 8-h rate is noise;
+            # only exit when the trend is genuinely unfavourable.
+            if avg_apy < 0:
                 entry_time = timestamps[entry_idx]
                 exit_time = timestamps[i]
                 entry_price = prices[entry_idx]
@@ -496,7 +498,7 @@ def main() -> None:
           f"Max Basis: {max_basis:.1f}%  |  Avg Window: {args.avg_window}")
     print(f"  Pairs: {len(pairs)}  |  Fees: {ROUND_TRIP_FEE_PCT:.2f}% round-trip")
     print(f"  Signal: ENTER when avg_funding_apy ≥ {min_apy:.1f}%")
-    print(f"          EXIT  when current funding_rate < 0")
+    print(f"          EXIT  when avg_funding_apy < 0")
 
     results: list[BacktestResult] = []
 
