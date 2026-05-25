@@ -44,7 +44,6 @@ from config import (
     BINANCE_API_SECRET,
     BINANCE_TESTNET,
     DEFAULT_TRADE_QTY,
-    HTTPS_PROXY,
     MAKER_ORDER_TIMEOUT,
     MAKER_POLL_INTERVAL,
     MAX_POSITION_VALUE_USD,
@@ -91,8 +90,6 @@ def _get_futures_exchange() -> ccxt.binance:
             "options": {"defaultType": "future"},
             "enableRateLimit": True,
         }
-        if HTTPS_PROXY:
-            config["proxies"] = {"https": HTTPS_PROXY, "http": HTTPS_PROXY}
         _futures_exchange = ccxt.binance(config)
         if BINANCE_TESTNET:
             _futures_exchange.set_sandbox_mode(True)
@@ -100,12 +97,6 @@ def _get_futures_exchange() -> ccxt.binance:
             _futures_exchange.load_markets()
         except Exception as e:
             _futures_exchange = None
-            if "Timeout" in type(e).__name__ or "timeout" in str(e).lower():
-                raise ConnectionError(
-                    f"Cannot reach Binance API: {e}. "
-                    "Set HTTPS_PROXY in .env if your network blocks Binance "
-                    "(e.g. HTTPS_PROXY=http://127.0.0.1:7890)."
-                ) from e
             raise
     return _futures_exchange
 
