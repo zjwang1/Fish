@@ -31,8 +31,11 @@ BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 BINANCE_TESTNET = os.getenv("BINANCE_TESTNET", "true").lower() == "true"
 
 # ── Strategy parameters ──────────────────────────────────────────────
-# Minimum annualised funding-rate yield (%) to consider entry
-MIN_FUNDING_APY = float(os.getenv("MIN_FUNDING_APY", "10.0"))
+# Minimum annualised funding-rate yield (%) to consider entry.
+# At 20 % APY each 8-h period yields ~0.018 %, comfortably above the
+# 0.02 % round-trip fee within 2 periods.  Lower values (e.g. 10 %)
+# risk entering positions where funding barely covers trading costs.
+MIN_FUNDING_APY = float(os.getenv("MIN_FUNDING_APY", "20.0"))
 # Maximum acceptable basis (stock-futures) divergence (%) for entry
 MAX_BASIS_PCT = float(os.getenv("MAX_BASIS_PCT", "1.0"))
 # Default number of shares per trade
@@ -55,6 +58,12 @@ MAX_STOCK_RETRIES = int(os.getenv("MAX_STOCK_RETRIES", "5"))
 # Prevents over-leveraging that could lead to futures liquidation.
 # Set to 0 to disable the limit.
 MAX_POSITION_VALUE_USD = float(os.getenv("MAX_POSITION_VALUE_USD", "0"))
+
+# Minimum number of 8-h funding periods to hold before considering exit.
+# Prevents churning: at 20 % APY each period yields ~0.018 %, so you need
+# ≥ 2 periods just to cover the 0.02 % round-trip fee.  Default 6 (= 48 h)
+# gives a comfortable 9× margin above breakeven.
+MIN_HOLD_PERIODS = int(os.getenv("MIN_HOLD_PERIODS", "6"))
 
 # Funding is settled every 8 hours on Binance → 3 × 365 = 1095 periods/year
 FUNDING_PERIODS_PER_YEAR = 3 * 365

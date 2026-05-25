@@ -112,7 +112,7 @@ def compute_snapshot(pair: ArbPair) -> Optional[FundingSnapshot]:
     # ── Signal logic ─────────────────────────────────────────────────
     #   ENTER       – funding APY above threshold AND basis within range
     #   HOLD        – already in position, still profitable
-    #   EXIT        – funding turned negative (longs pay → shorts pay)
+    #   EXIT        – avg funding APY turned negative (trend unfavourable)
     #   UNFAVORABLE – conditions not met
     effective_apy = avg_funding_apy if avg_funding_apy is not None else funding_apy
 
@@ -121,8 +121,8 @@ def compute_snapshot(pair: ArbPair) -> Optional[FundingSnapshot]:
             signal = "ENTER"
         else:
             signal = "HOLD"   # funding good but basis too wide to enter fresh
-    elif funding_rate is not None and funding_rate < 0:
-        signal = "EXIT"       # shorts are *paying* → close position
+    elif effective_apy is not None and effective_apy < 0:
+        signal = "EXIT"       # rolling-avg APY negative → close position
     else:
         signal = "UNFAVORABLE"
 
